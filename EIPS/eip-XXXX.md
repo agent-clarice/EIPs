@@ -142,19 +142,31 @@ function setFeeRecipient(
 
 > Note: The simplified interface in the previous section omits proof parameters for readability. Implementations MUST include proof verification.
 
-### Execution Layer Block Construction
+### Execution Layer Block Validation
 
-After `FORK_TIMESTAMP`, execution layer clients constructing blocks MUST apply the following logic when determining the `feeRecipient` field of the execution payload header:
+After `FORK_TIMESTAMP`, execution layer clients MUST apply the following validity rule when processing blocks:
 
 1. Read the fee recipient registry at `FEE_RECIPIENT_REGISTRY_ADDRESS` for the proposing validator's index.
-2. If a non-zero address is registered, use it as the block's `feeRecipient`.
-3. If no entry exists (returns `address(0)`), use the `suggestedFeeRecipient` from the `engine_forkchoiceUpdatedV*` call (current behaviour).
+2. If a non-zero address is registered, the block's `feeRecipient` field in the execution payload header **MUST** match the registered address. If it does not, the block is **invalid** and MUST be rejected.
+3. If no entry exists (returns `address(0)`), no additional validation is applied. The `feeRecipient` field is unconstrained, preserving current behaviour.
 
-This preserves full backward compatibility.
+This is a **tightening of block validity rules**: blocks that were previously valid (any `feeRecipient` value accepted) may now be invalid if they do not match the on-chain registry. This is analogous to how the protocol enforces withdrawal destinations — the block producer has no discretion over where registered fee revenue is directed.
+
+### Execution Layer Block Construction
+
+When building blocks, execution layer clients MUST apply the following logic:
+
+1. Read the fee recipient registry at `FEE_RECIPIENT_REGISTRY_ADDRESS` for the proposing validator's index.
+2. If a non-zero address is registered, use it as the block's `feeRecipient`. Any other value will produce an invalid block.
+3. If no entry exists (returns `address(0)`), use the `suggestedFeeRecipient` from the `engine_forkchoiceUpdatedV*` call (current behaviour).
 
 ### Consensus Layer
 
-No consensus layer specification changes are required. The `prepare_beacon_proposer` Beacon API endpoint and validator client `ProposerConfig` continue to function as a fallback mechanism.
+No consensus layer specification changes are required. The `prepare_beacon_proposer` Beacon API endpoint and validator client `ProposerConfig` continue to function as a fallback when no on-chain fee recipient is registered.
+
+### Interaction with External Block Builders (MEV-Boost)
+
+When a validator has a registered fee recipient, external block builders (via MEV-Boost or equivalent) MUST set the `feeRecipient` to the registered address. Blocks submitted by builders that do not match the registry will be rejected by the network as invalid. This eliminates the need for trust between proposers and builders/relays regarding fee recipient honesty — the protocol enforces it.
 
 ## Rationale
 
@@ -162,9 +174,9 @@ No consensus layer specification changes are required. The `prepare_beacon_propo
 
 The withdrawal address is the canonical "owner" of a validator — the entity the protocol already trusts with the most sensitive operation (fund withdrawals). Granting it authority over fee recipient configuration is a natural extension of the same security model. Just as no operator can redirect withdrawals, no operator should be able to redirect fee revenue once the owner has registered a recipient on-chain.
 
-### Protocol enforcement, not voluntary adoption
+### Block validity enforcement
 
-A critical design requirement is that the EL client MUST respect the on-chain registry. An alternative approach — deploying a voluntary contract and asking client teams or operators to read it via sidecar software — does not close the security gap. A malicious or negligent operator simply does not run the sidecar. Protocol-level enforcement is the only mechanism that provides the same unconditional guarantee as withdrawal credentials.
+A critical design requirement is that the fee recipient is enforced at the **block validity** level — blocks with an incorrect `feeRecipient` are rejected by the network. Weaker alternatives (client software features, sidecar tools, or even a MUST-check-but-not-validate spec) all leave discretion with the block producer. A malicious operator, builder, or relay can simply ignore the registry if there is no validity consequence. Block-level enforcement is the only mechanism that provides the same unconditional guarantee as withdrawal credentials: the protocol itself rejects non-compliant blocks, regardless of who built them.
 
 ### System contract vs. beacon state field
 
@@ -269,7 +281,7 @@ Setting a fee recipient is not time-sensitive — it affects future proposed blo
 
 ### Interaction with MEV-Boost
 
-MEV-Boost and external block builders negotiate fee recipients out-of-band via proposer registrations. This EIP does not alter that flow. However, the on-chain registry could serve as a verifiable source of truth that relay operators and builders reference, improving trust in the MEV supply chain.
+MEV-Boost and external block builders currently negotiate fee recipients out-of-band via proposer registrations. After this EIP, builders MUST set the `feeRecipient` to the registered address for validators with an on-chain entry, or the block will be rejected by the network. This strictly improves the trust model — builders and relays can no longer misattribute fee revenue, intentionally or accidentally. Relays that submit blocks with incorrect fee recipients will see those blocks orphaned, creating a strong economic incentive for compliance.
 
 ### Gas cost
 
