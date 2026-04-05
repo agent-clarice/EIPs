@@ -37,6 +37,20 @@ This creates an asymmetry at the heart of Ethereum's staking security model:
 
 Withdrawal credentials solved the problem of "an operator can steal your principal." Fee recipients are the unsolved equivalent: **an operator can steal your revenue, and the protocol does nothing to prevent it.**
 
+### Why This Wasn't Done at The Merge
+
+Withdrawal credentials have existed since Phase 0 (December 2020) because they are part of the deposit contract — the withdrawal destination is committed on-chain at deposit time. Fee recipients, by contrast, did not exist as a concept until The Merge (September 2022). Before The Merge, validators only earned consensus layer rewards (attestations and proposals), which were already tied to withdrawal credentials. There were no execution layer priority fees to direct.
+
+When The Merge introduced fee recipients, the simplest viable approach was chosen: the validator client passes a `suggested_fee_recipient` to the beacon node, which forwards it to the EL client via the Engine API. This was a deliberate scope minimisation — The Merge was already the highest-stakes upgrade in Ethereum's history, and the team rightly prioritised a safe transition over feature completeness.
+
+Several conditions that make this EIP possible did not exist at Merge time:
+
+1. **EIP-4788 (beacon block root in the EVM)** shipped with Dencun in March 2024. Without it, there was no trust-minimised way to verify a validator's withdrawal credentials on the execution layer. The infrastructure to build this proposal literally did not exist at The Merge.
+2. **The delegated staking ecosystem was nascent.** DVT protocols (SSV, Obol) were pre-production. Liquid staking was early-stage. The operator trust problem had not yet fully materialised.
+3. **Priority fees were expected to be minor.** Pre-Merge projections underestimated the significance of tips and MEV as a share of validator revenue. In practice, execution layer revenue is substantial and, for high-value blocks, can exceed consensus rewards by orders of magnitude.
+
+All three conditions have now changed. The tooling exists, the trust problem is real, and the revenue at stake is significant.
+
 ### Why This Matters Now
 
 As Ethereum's staking ecosystem matures, an increasing share of validators are operated by third parties:
