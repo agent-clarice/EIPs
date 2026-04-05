@@ -13,23 +13,46 @@ requires: 4788
 
 ## Abstract
 
-This EIP introduces a system-level smart contract that allows Ethereum validators to set and update their execution layer fee recipient address via an on-chain transaction. Currently, the fee recipient (`suggested_fee_recipient`) is configured locally in the validator client and communicated to the beacon node via the Beacon API. This proposal moves fee recipient management on-chain, making it auditable, portable across clients, and independent of local configuration.
+This EIP introduces a system-level smart contract that allows Ethereum validators to set and update their execution layer fee recipient address via an on-chain transaction. Currently, the fee recipient (`suggested_fee_recipient`) is configured locally in the validator client and communicated to the beacon node via the Beacon API. This proposal moves fee recipient management on-chain with protocol-level enforcement, giving fee recipients the same security guarantees that withdrawal credentials provide for validator principal.
 
 ## Motivation
 
-The current mechanism for setting execution layer fee recipients has several shortcomings:
+### The Security Gap
 
-1. **Configuration fragility** — The fee recipient is set per-validator in client configuration files. Misconfiguration or omission silently defaults to the zero address or a client-specific fallback, resulting in lost revenue.
+Ethereum's proof-of-stake design provides strong, protocol-enforced guarantees for validator funds through withdrawal credentials. Once a validator sets 0x01 withdrawal credentials, no operator, client bug, or misconfiguration can redirect those funds — the protocol enforces the destination at the consensus layer. This is a fundamental security property.
 
-2. **No portability** — Migrating between validator clients, machines, or staking services requires manually re-specifying fee recipients. There is no canonical source of truth shared across the network.
+**Fee recipients have no such protection.**
 
-3. **No auditability** — There is no on-chain record of a validator's intended fee recipient. Delegators in staking pools and DVT clusters cannot independently verify where priority fees and MEV rewards are directed.
+Today, the fee recipient — the address that receives priority fees and MEV revenue from proposed blocks — is a local configuration value in the validator client. It is not enforced by the protocol. It is not recorded on-chain. It is entirely trust-based.
 
-4. **Operator trust** — Delegated staking arrangements (liquid staking, DVT clusters, institutional custodians) require trusting the operator to correctly configure the fee recipient. An on-chain registry provides a trust-minimised alternative with a verifiable commitment.
+This creates an asymmetry at the heart of Ethereum's staking security model:
 
-5. **Multi-client redundancy** — Operators running redundant or failover validator clients must keep fee recipient configuration synchronised across all instances manually.
+| | Validator Principal (Withdrawals) | Validator Revenue (Fee Recipient) |
+|---|---|---|
+| **Set by** | On-chain (protocol-enforced) | Local config (trust-based) |
+| **Can operator redirect?** | No | Yes |
+| **Verifiable on-chain?** | Yes | No |
+| **Survives client migration?** | Yes | No |
+| **Protection against misconfiguration?** | Protocol rejects invalid changes | Silent fallback to zero address |
 
-An on-chain registry, updatable only by the validator's withdrawal address, solves these problems with a single transaction.
+Withdrawal credentials solved the problem of "an operator can steal your principal." Fee recipients are the unsolved equivalent: **an operator can steal your revenue, and the protocol does nothing to prevent it.**
+
+### Why This Matters Now
+
+As Ethereum's staking ecosystem matures, an increasing share of validators are operated by third parties:
+
+- **Liquid staking protocols** delegate validation to node operators. Stakers trust that operators configure fee recipients honestly. There is no on-chain mechanism to verify or enforce this.
+- **DVT clusters** (e.g., SSV, Obol) distribute validator duties across multiple operators. Fee recipient configuration must be agreed upon and correctly set by the active operator — with no protocol enforcement.
+- **Institutional custodians** manage validators on behalf of clients. Fee recipient misconfiguration or misappropriation is undetectable on-chain.
+- **Solo stakers** migrating between clients, machines, or failover setups must manually reconfigure fee recipients each time, with silent failure on misconfiguration.
+
+The protocol should not rely on operator goodwill for revenue security any more than it relies on operator goodwill for fund security. Both deserve the same guarantee.
+
+### Design Principle
+
+> **If withdrawal credentials make validator principal unstealable, fee recipient credentials should make validator revenue unstealable.**
+
+This EIP closes the gap by introducing an on-chain fee recipient registry with protocol-level enforcement, controlled exclusively by the validator's withdrawal address — the same entity the protocol already trusts with fund security.
 
 ## Specification
 
@@ -123,19 +146,31 @@ No consensus layer specification changes are required. The `prepare_beacon_propo
 
 ### Withdrawal address as authoriser
 
-The withdrawal address is the canonical "owner" of a validator. It already controls the most security-critical operation — fund withdrawals. Extending its authority to fee recipient configuration is a natural and minimal trust escalation.
+The withdrawal address is the canonical "owner" of a validator — the entity the protocol already trusts with the most sensitive operation (fund withdrawals). Granting it authority over fee recipient configuration is a natural extension of the same security model. Just as no operator can redirect withdrawals, no operator should be able to redirect fee revenue once the owner has registered a recipient on-chain.
 
-### System contract vs. protocol-level field
+### Protocol enforcement, not voluntary adoption
 
-A contract-based approach was chosen over adding a new field to the `Validator` container in the beacon state because:
+A critical design requirement is that the EL client MUST respect the on-chain registry. An alternative approach — deploying a voluntary contract and asking client teams or operators to read it via sidecar software — does not close the security gap. A malicious or negligent operator simply does not run the sidecar. Protocol-level enforcement is the only mechanism that provides the same unconditional guarantee as withdrawal credentials.
+
+### System contract vs. beacon state field
+
+Two on-chain approaches were considered:
+
+1. **System contract on the execution layer** (this proposal)
+2. **New field on the `Validator` container in the beacon state**, changeable via a signed voluntary message (analogous to `BLSToExecutionChange`)
+
+A contract-based approach was chosen because:
 
 - It requires no consensus specification changes beyond reading a contract during block construction.
 - It provides a standard ABI and emits events, enabling straightforward integration with tooling, dashboards, and indexers.
 - It can be extended in future EIPs (e.g., time-locked changes, multi-sig authorisation) without further protocol modifications.
+- It avoids increasing the beacon state size, which has validator-count scaling implications.
+
+The beacon state approach is a valid alternative with different trade-offs (see [Considered Alternatives](#considered-alternatives)).
 
 ### Optional with fallback
 
-Mandatory on-chain registration would break every existing validator configuration. The fallback model ensures zero disruption: validators who never interact with the registry experience no change, while those who opt in gain stronger guarantees.
+Mandatory on-chain registration would break every existing validator configuration. The fallback model ensures zero disruption: validators who never interact with the registry experience no change, while those who opt in gain protocol-enforced guarantees equivalent to withdrawal credentials.
 
 ### Batch operations
 
@@ -144,6 +179,26 @@ Large operators (staking pools, institutional validators) may manage thousands o
 ### EIP-4788 dependency
 
 Using the beacon block root oracle (EIP-4788) for withdrawal credential verification is the most trust-minimised approach available on the execution layer. It avoids introducing new precompiles or cross-layer communication mechanisms.
+
+## Considered Alternatives
+
+### 1. Voluntary contract with sidecar software
+
+Deploy a registry contract without protocol changes. Operators run a sidecar that reads the contract and updates their validator client's `proposer_config` or calls `prepare_beacon_proposer`.
+
+**Rejected because:** This does not provide protocol-level enforcement. The operator must voluntarily run the sidecar. A malicious operator simply does not run it, and there is no on-chain mechanism to detect or prevent fee misappropriation. This approach cannot deliver the same security guarantee as withdrawal credentials.
+
+### 2. Beacon state field with voluntary message
+
+Add a `fee_recipient` field to the beacon state `Validator` container, changeable via a new signed voluntary message type (similar to `BLSToExecutionChange`).
+
+**Trade-offs:** This approach provides consensus-layer enforcement and avoids EL contract complexity. However, it increases beacon state size per validator, requires consensus specification changes, and is less extensible than a contract. It remains a viable alternative and could be proposed as a competing or complementary EIP.
+
+### 3. Client-level flag to read a specific contract
+
+Client teams voluntarily add a flag (e.g., `--fee-recipient-registry=0x...`) to read a deployed contract during block construction. No protocol change required.
+
+**Rejected because:** Voluntary client support is fragile. Not all clients may implement it, implementations may differ, and there is no guarantee of consistent behaviour across the network. Protocol-level specification ensures uniform enforcement.
 
 ## Backwards Compatibility
 
